@@ -53,10 +53,13 @@ class _Peer {
 }
 
 Future<void> _until(bool Function() cond,
-    {Duration timeout = const Duration(seconds: 4)}) async {
+    {Duration timeout = const Duration(seconds: 4),
+    String Function()? what}) async {
   final end = DateTime.now().add(timeout);
   while (!cond()) {
-    if (DateTime.now().isAfter(end)) throw TimeoutException('condição');
+    if (DateTime.now().isAfter(end)) {
+      throw TimeoutException('condição: ${what?.call() ?? ''}');
+    }
     await Future<void>.delayed(const Duration(milliseconds: 20));
   }
 }
@@ -259,17 +262,38 @@ void main() {
       final pc1 = await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, 0);
       final pc2 = await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, 0);
 
+      String diag() => 'toA=$toA toB=$toB pc1=${pc1.port} pc2=${pc2.port} '
+          'slotA=$slotA slotB=$slotB hub[${hub.debugStats}] '
+          't1[pipes=${t1.pipeStats} notMine=${t1.droppedNotMine} '
+          'noPipe=${t1.droppedNoPipe} noPort=${t1.droppedNoPort} '
+          'foreign=${t1.droppedForeign}] '
+          't2[pipes=${t2.pipeStats} notMine=${t2.droppedNotMine} '
+          'noPipe=${t2.droppedNoPipe} noPort=${t2.droppedNoPort} '
+          'foreign=${t2.droppedForeign}]';
+
       // O "WebRTC" do lado B se apresenta primeiro (o túnel aprende a porta).
       pc2.send(utf8.encode('init'), InternetAddress.loopbackIPv4, toA);
-      await Future<void>.delayed(const Duration(milliseconds: 150));
+      await _until(() => (t2.pipeStats[slotA]?.$1 ?? 0) >= 1,
+          what: () => 'init não saiu de t2: ${diag()}');
+      await _until(() => hub.forwarded >= 1,
+          what: () => 'hub não repassou init: ${diag()}');
+      await _until(() => t1.droppedNoPort >= 1,
+          what: () => 'init não chegou em t1: ${diag()}');
 
-      final gotB = _receiveOne(pc2);
       pc1.send(utf8.encode('ola de A'), InternetAddress.loopbackIPv4, toB);
-      expect(utf8.decode(await gotB), 'ola de A');
+      await _until(() => (t1.pipeStats[slotB]?.$1 ?? 0) >= 1,
+          what: () => 'ola não saiu de t1: ${diag()}');
+      await _until(() => hub.forwarded >= 2,
+          what: () => 'hub não repassou ola: ${diag()}');
+      await _until(() => (t2.pipeStats[slotA]?.$2 ?? 0) >= 1,
+          what: () => 'ola não foi entregue por t2: ${diag()}');
+      // O datagrama fica na fila do socket até alguém ler.
+      expect(utf8.decode(await _receiveOne(pc2)), 'ola de A', reason: diag());
 
-      final gotA = _receiveOne(pc1);
       pc2.send(utf8.encode('oi de B'), InternetAddress.loopbackIPv4, toA);
-      expect(utf8.decode(await gotA), 'oi de B');
+      await _until(() => (t1.pipeStats[slotB]?.$2 ?? 0) >= 1,
+          what: () => 'oi não foi entregue por t1: ${diag()}');
+      expect(utf8.decode(await _receiveOne(pc1)), 'oi de B', reason: diag());
       expect(hub.forwarded, greaterThanOrEqualTo(2));
 
       pc1.close();

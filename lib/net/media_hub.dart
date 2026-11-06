@@ -44,6 +44,15 @@ class MediaHub {
 
   int forwarded = 0;
 
+  String get debugStats => 'fwd=$forwarded unknown=$droppedUnknownSender '
+      'stale=$droppedStaleSender noTarget=$droppedNoTarget '
+      'endpoints=${{for (final e in _endpoints.entries) e.key: '${e.value.address.address}:${e.value.port}'}}';
+
+  /// Diagnóstico de pacotes de mídia descartados.
+  int droppedUnknownSender = 0;
+  int droppedStaleSender = 0;
+  int droppedNoTarget = 0;
+
   int get boundPort => _socket?.port ?? port;
 
   Future<void> start() async {
@@ -82,12 +91,21 @@ class MediaHub {
     switch (h.type) {
       case Proto.typeData:
         final from = _endpoints[h.a];
-        if (from == null || !from.matches(dg)) return;
+        if (from == null || !from.matches(dg)) {
+          droppedUnknownSender++;
+          return;
+        }
         // O lugar pode ter mudado de dono: só vale a chave atual.
-        if (!identical(keyForSlot(h.a), from.key)) return;
+        if (!identical(keyForSlot(h.a), from.key)) {
+          droppedStaleSender++;
+          return;
+        }
         from.lastSeenMs = _now();
         final to = _endpoints[h.b];
-        if (to == null || !identical(keyForSlot(h.b), to.key)) return;
+        if (to == null || !identical(keyForSlot(h.b), to.key)) {
+          droppedNoTarget++;
+          return;
+        }
         _send(s, data, to.address, to.port);
         forwarded++;
       case Proto.typeHello:

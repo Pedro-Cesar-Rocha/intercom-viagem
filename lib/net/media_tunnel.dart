@@ -103,7 +103,7 @@ class MediaTunnel {
       final pipe = await future;
       return pipe.socket.port;
     } finally {
-      _opening.remove(slot);
+      _opening.remove(slot)?.ignore();
     }
   }
 
@@ -136,6 +136,17 @@ class MediaTunnel {
   }
 
   int lastRxMs(int slot) => _pipes[slot]?.lastRxMs ?? 0;
+
+  /// Diagnóstico: lugar -> (enviados ao hub, entregues ao WebRTC, porta local).
+  Map<int, (int, int, int?)> get pipeStats => {
+        for (final e in _pipes.entries) e.key: (e.value.tx, e.value.rx, e.value.pcPort),
+      };
+
+  /// Diagnóstico: pacotes do hub descartados (lugar errado / sem porta local).
+  int droppedNotMine = 0;
+  int droppedNoPipe = 0;
+  int droppedNoPort = 0;
+  int droppedForeign = 0;
 
   Future<void> close() async {
     _closed = true;
@@ -189,17 +200,27 @@ class MediaTunnel {
       final dg = s.receive();
       if (dg == null) break;
       if (dg.port != _hubPort || dg.address.address != _hubAddress.address) {
+        droppedForeign++;
         continue;
       }
       final data = dg.data;
       final h = PacketHeader.parse(data);
       if (h == null) continue;
       if (h.type == Proto.typeData) {
-        if (h.b != _mySlot) continue;
+        if (h.b != _mySlot) {
+          droppedNotMine++;
+          continue;
+        }
         final pipe = _pipes[h.a];
-        if (pipe == null) continue;
+        if (pipe == null) {
+          droppedNoPipe++;
+          continue;
+        }
         final pcPort = pipe.pcPort;
-        if (pcPort == null) continue;
+        if (pcPort == null) {
+          droppedNoPort++;
+          continue;
+        }
         try {
           pipe.socket.send(
               Packets.payloadOf(data), InternetAddress.loopbackIPv4, pcPort);
