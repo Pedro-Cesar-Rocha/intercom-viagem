@@ -1,0 +1,21 @@
+name: comboio
+description: "Comboio — intercom de viagem por Wi-Fi/hotspot para até 4 pessoas."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_webrtc: 1.6.3
+  network_info_plus: ^8.2.2
+  shared_preferences: ^2.5.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true

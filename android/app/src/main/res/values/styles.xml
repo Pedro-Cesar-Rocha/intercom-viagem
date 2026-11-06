@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Tema enquanto o Flutter inicia -->
+    <style name="LaunchTheme" parent="@android:style/Theme.Black.NoTitleBar">
+        <item name="android:windowBackground">@drawable/launch_background</item>
+        <item name="android:statusBarColor">#FF0A0E16</item>
+        <item name="android:navigationBarColor">#FF0A0E16</item>
+    </style>
+    <!-- Fundo atrás da interface do Flutter -->
+    <style name="NormalTheme" parent="@android:style/Theme.Black.NoTitleBar">
+        <item name="android:windowBackground">@drawable/normal_background</item>
+    </style>
+</resources>

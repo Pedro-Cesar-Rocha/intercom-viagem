@@ -1,0 +1,216 @@
+name: Compilar Comboio
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Análise e testes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Preparar projeto
+        shell: bash
+        run: |
+          mkdir -p logs
+          flutter --version 2>&1 | tee logs/versions.txt
+          bash tool/setup_platforms.sh 2>&1 | tee logs/setup.txt
+          flutter pub get 2>&1 | tee logs/pub.txt
+
+      - name: Análise
+        shell: bash
+        continue-on-error: true
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings 2>&1 | tee logs/analyze.txt
+
+      - name: Testes de rede
+        shell: bash
+        continue-on-error: true
+        run: flutter test 2>&1 | tee logs/test.txt
+
+      - name: Enviar logs
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          shopt -s nullglob
+          files=()
+          for f in logs/*.txt; do cp "$f" "check-$(basename "$f")"; files+=("check-$(basename "$f")"); done
+          echo "run=${{ github.run_number }} sha=$GITHUB_SHA" > check-status.txt
+          files+=(check-status.txt)
+          gh release view ci-logs --repo "$REPO" >/dev/null 2>&1 || \
+            gh release create ci-logs --repo "$REPO" --prerelease --latest=false \
+              --title "Logs de compilação" \
+              --notes "Saída dos builds automáticos (diagnóstico). Os apps ficam na release 'latest'." || true
+          gh release upload ci-logs "${files[@]}" --repo "$REPO" --clobber
+
+  android:
+    name: Android (APK)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Preparar projeto
+        shell: bash
+        run: |
+          mkdir -p logs
+          flutter --version 2>&1 | tee logs/versions.txt
+          bash tool/setup_platforms.sh 2>&1 | tee logs/setup.txt
+          flutter pub get 2>&1 | tee logs/pub.txt
+
+      - name: Compilar APK
+        shell: bash
+        run: |
+          mkdir -p ~/.android
+          cp ci/debug.keystore ~/.android/debug.keystore
+          flutter build apk --release \
+            --build-number=${{ github.run_number }} \
+            --target-platform android-arm,android-arm64 2>&1 | tee logs/build.txt
+          cp build/app/outputs/flutter-apk/app-release.apk Comboio.apk
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: android
+          path: |
+            Comboio.apk
+            logs/
+          if-no-files-found: ignore
+
+  ios:
+    name: iOS (IPA sem assinatura)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Preparar projeto
+        shell: bash
+        run: |
+          mkdir -p logs
+          { flutter --version; xcodebuild -version; pod --version; } 2>&1 | tee logs/versions.txt
+          # CocoaPods para todos os plugins (o WebRTC vem como pod).
+          flutter config --no-enable-swift-package-manager 2>&1 | tee logs/setup.txt
+          bash tool/setup_platforms.sh 2>&1 | tee -a logs/setup.txt
+          flutter pub get 2>&1 | tee logs/pub.txt
+
+      - name: Compilar
+        shell: bash
+        run: |
+          flutter build ios --release --no-codesign \
+            --build-number=${{ github.run_number }} 2>&1 | tee logs/build.txt
+
+      - name: Empacotar IPA
+        shell: bash
+        run: |
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R build/ios/iphoneos/Runner.app Payload/
+          zip -qry Comboio-unsigned.ipa Payload
+          ls -lh Comboio-unsigned.ipa | tee -a logs/build.txt
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ios
+          path: |
+            Comboio-unsigned.ipa
+            logs/
+          if-no-files-found: ignore
+
+  publish:
+    name: Publicar na página de Releases
+    needs: [android, ios]
+    # Roda mesmo se um dos builds falhar, mas nunca num build cancelado.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+
+      - name: Publicar
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN: ${{ github.run_number }}
+          ANDROID_RESULT: ${{ needs.android.result }}
+          IOS_RESULT: ${{ needs.ios.result }}
+        run: |
+          shopt -s nullglob
+          ls -R dist || true
+
+          # Logs de diagnóstico (pré-release separada).
+          logs=()
+          for plat in android ios; do
+            for f in dist/$plat/logs/*.txt; do
+              out="$plat-$(basename "$f")"
+              cp "$f" "$out"
+              logs+=("$out")
+            done
+          done
+          { echo "run=$RUN android=$ANDROID_RESULT ios=$IOS_RESULT sha=$GITHUB_SHA"; } > status.txt
+          logs+=(status.txt)
+          if ! gh release view ci-logs --repo "$REPO" >/dev/null 2>&1; then
+            gh release create ci-logs --repo "$REPO" --prerelease --latest=false \
+              --title "Logs de compilação" \
+              --notes "Saída dos builds automáticos (diagnóstico). Os apps ficam na release 'latest'." || true
+          fi
+          gh release upload ci-logs "${logs[@]}" --repo "$REPO" --clobber
+
+          # Apps prontos.
+          bins=()
+          if [ -f dist/android/Comboio.apk ]; then bins+=(dist/android/Comboio.apk); fi
+          if [ -f dist/ios/Comboio-unsigned.ipa ]; then bins+=(dist/ios/Comboio-unsigned.ipa); fi
+          if [ ${#bins[@]} -eq 0 ]; then
+            echo "Nenhum app compilado neste build; release mantida como estava."
+            exit 0
+          fi
+          cat > notes.md <<NOTES
+          **Android:** baixe \`Comboio.apk\` no celular e instale (permita "instalar apps desconhecidos"). Atualizações instalam por cima.
+
+          **iPhone:** \`Comboio-unsigned.ipa\` precisa ser assinado com o seu Apple ID na instalação, com o Sideloadly (Windows/Mac) ou AltStore. Passo a passo no README.
+
+          Build #${RUN} — Android: ${ANDROID_RESULT}, iOS: ${IOS_RESULT}.
+          NOTES
+          if ! gh release view latest --repo "$REPO" >/dev/null 2>&1; then
+            gh release create latest --repo "$REPO" --latest \
+              --title "Comboio" --notes-file notes.md
+          fi
+          gh release upload latest "${bins[@]}" --repo "$REPO" --clobber
+          gh release edit latest --repo "$REPO" --latest \
+            --title "Comboio (build ${RUN})" --notes-file notes.md
