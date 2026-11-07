@@ -20,10 +20,14 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+    }
 
-        // Só celulares (ARM): o WebRTC traz também x86_64, que só pesaria.
-        ndk {
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+    // Só celulares (ARM). O WebRTC traz também bibliotecas x86/x86_64, que só
+    // aumentariam o APK. (O plugin do Flutter redefine abiFilters, então o
+    // corte é feito no empacotamento.)
+    packaging {
+        jniLibs {
+            excludes += setOf("**/x86_64/**", "**/x86/**")
         }
     }
 
