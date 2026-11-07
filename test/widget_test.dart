@@ -64,19 +64,39 @@ Future<void> _until(bool Function() cond,
   }
 }
 
-Future<Uint8List> _receiveOne(RawDatagramSocket s,
-    {Duration timeout = const Duration(seconds: 3)}) {
-  final c = Completer<Uint8List>();
-  late StreamSubscription<RawSocketEvent> sub;
-  sub = s.listen((ev) {
-    if (ev != RawSocketEvent.read) return;
-    final dg = s.receive();
-    if (dg != null && !c.isCompleted) {
-      c.complete(dg.data);
-      unawaited(sub.cancel());
+/// Fila de datagramas recebidos por um socket.
+///
+/// Atenção: cancelar a assinatura de um RawDatagramSocket fecha o socket,
+/// então a escuta fica ativa até o fim do teste.
+class _Inbox {
+  _Inbox(this.socket) {
+    socket.listen((ev) {
+      if (ev != RawSocketEvent.read) return;
+      while (true) {
+        final dg = socket.receive();
+        if (dg == null) break;
+        _queue.add(dg.data);
+      }
+      final w = _waiter;
+      _waiter = null;
+      if (w != null && !w.isCompleted) w.complete();
+    });
+  }
+
+  final RawDatagramSocket socket;
+  final List<Uint8List> _queue = [];
+  Completer<void>? _waiter;
+
+  Future<Uint8List> next({Duration timeout = const Duration(seconds: 3)}) async {
+    final end = DateTime.now().add(timeout);
+    while (_queue.isEmpty) {
+      final left = end.difference(DateTime.now());
+      if (left <= Duration.zero) throw TimeoutException('nada recebido');
+      final w = _waiter ??= Completer<void>();
+      await w.future.timeout(left, onTimeout: () {});
     }
-  });
-  return c.future.timeout(timeout);
+    return _queue.removeAt(0);
+  }
 }
 
 void main() {
@@ -261,6 +281,8 @@ void main() {
       final toA = await t2.openPipe(slotA);
       final pc1 = await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, 0);
       final pc2 = await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final in1 = _Inbox(pc1);
+      final in2 = _Inbox(pc2);
 
       String diag() => 'toA=$toA toB=$toB pc1=${pc1.port} pc2=${pc2.port} '
           'slotA=$slotA slotB=$slotB hub[${hub.debugStats}] '
@@ -287,13 +309,12 @@ void main() {
           what: () => 'hub não repassou ola: ${diag()}');
       await _until(() => (t2.pipeStats[slotA]?.$2 ?? 0) >= 1,
           what: () => 'ola não foi entregue por t2: ${diag()}');
-      // O datagrama fica na fila do socket até alguém ler.
-      expect(utf8.decode(await _receiveOne(pc2)), 'ola de A', reason: diag());
+      expect(utf8.decode(await in2.next()), 'ola de A', reason: diag());
 
       pc2.send(utf8.encode('oi de B'), InternetAddress.loopbackIPv4, toA);
       await _until(() => (t1.pipeStats[slotB]?.$2 ?? 0) >= 1,
           what: () => 'oi não foi entregue por t1: ${diag()}');
-      expect(utf8.decode(await _receiveOne(pc1)), 'oi de B', reason: diag());
+      expect(utf8.decode(await in1.next()), 'oi de B', reason: diag());
       expect(hub.forwarded, greaterThanOrEqualTo(2));
 
       pc1.close();
